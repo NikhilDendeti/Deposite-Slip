@@ -99,8 +99,8 @@ def upload_view():
         manual_amount = st.number_input("Manual Amount", min_value=0.0, step=0.01)
         manual_date = st.date_input("Manual Date", value=None)
         file = st.file_uploader("Deposit slip file (image or PDF)", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"])
-        # Support OCR, LLM, and Vision modes
-        mode = st.selectbox("Processing mode", ["ocr", "llm", "vision"], index=0)
+        # Support OCR, Vision and Google Cloud Vision modes
+        mode = st.selectbox("Processing mode", ["ocr", "vision", "gcv"], index=0)
         submitted = st.form_submit_button("Upload")
     if submitted:
         if not file:

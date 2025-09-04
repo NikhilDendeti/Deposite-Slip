@@ -69,25 +69,30 @@ class DepositSlipValidator:
     def validate_amount(self, ocr_amount: float, manual_amount: float, collection_amount: float) -> Dict:
         errors = []
         warnings = []
-        deposit_amount = manual_amount if manual_amount is not None else ocr_amount
-        if deposit_amount is None:
+        
+        # Choose a primary amount (prefer manual for range sanity checks),
+        # but treat comparisons separately (manual vs OCR, OCR vs collection)
+        primary_amount = manual_amount if manual_amount is not None else ocr_amount
+        if primary_amount is None:
             errors.append("No amount found in deposit slip")
             return {'is_valid': False, 'errors': errors}
 
-        if deposit_amount < self.validation_rules['min_amount']:
-            errors.append(f"Amount too small: ${deposit_amount}")
-        if deposit_amount > self.validation_rules['max_amount']:
-            errors.append(f"Amount too large: ${deposit_amount}")
+        # Range validation on the value the user would proceed with
+        if primary_amount < self.validation_rules['min_amount']:
+            errors.append(f"Amount too small: ${primary_amount}")
+        if primary_amount > self.validation_rules['max_amount']:
+            errors.append(f"Amount too large: ${primary_amount}")
 
-        amount_diff = abs(deposit_amount - collection_amount)
-        if amount_diff > self.validation_rules['amount_tolerance']:
-            if manual_amount is not None:
-                errors.append(f"Manual amount ${deposit_amount} doesn't match collection ${collection_amount}")
-            else:
-                warnings.append(f"OCR amount ${deposit_amount} doesn't match collection ${collection_amount}")
+        # If both manual and OCR exist, ensure they agree (authoritative user input vs extracted)
+        if (ocr_amount is not None and manual_amount is not None and
+                abs(ocr_amount - manual_amount) > self.validation_rules['amount_tolerance']):
+            errors.append(f"Manual amount ${manual_amount} differs from OCR amount ${ocr_amount}")
 
-        if ocr_amount and manual_amount and abs(ocr_amount - manual_amount) > self.validation_rules['amount_tolerance']:
-            warnings.append(f"OCR amount ${ocr_amount} differs from manual amount ${manual_amount}")
+        # Compare OCR vs collection as a warning (informational), do NOT fail due to this alone
+        if ocr_amount is not None:
+            ocr_vs_coll = abs(ocr_amount - collection_amount)
+            if ocr_vs_coll > self.validation_rules['amount_tolerance']:
+                warnings.append(f"OCR amount ${ocr_amount} doesn't match collection ${collection_amount}")
 
         return {
             'is_valid': len(errors) == 0,

@@ -63,9 +63,9 @@ async def upload_deposit_slip(
         #     print(f"❌ DUPLICATE FILE: already exists as deposit slip ID {existing.id}")
         #     raise HTTPException(status_code=400, detail="Duplicate deposit slip file detected")
 
-        # normalize mode (support 'ocr', 'llm', 'vision')
+        # normalize mode (support 'ocr', 'llm', 'vision', 'gcv')
         mode_normalized = (mode or "ocr").lower()
-        if mode_normalized not in ("ocr", "llm", "vision"):
+        if mode_normalized not in ("ocr", "llm", "vision", "gcv"):
             mode_normalized = "ocr"
         print(f"🔍 OCR PROCESSING START: mode={mode_normalized}")
         ocr_result = await ocr_processor.process_deposit_slip(str(file_path), mode=mode_normalized)

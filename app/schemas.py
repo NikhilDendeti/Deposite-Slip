@@ -11,6 +11,7 @@ class ProcessingDetails(BaseModel):
     ocr_confidence: Optional[float] = None
     rules_confidence: Optional[float] = None
     llm_confidence: Optional[float] = None
+    gcv_confidence: Optional[float] = None
 
 class UserCreate(BaseModel):
     email: EmailStr

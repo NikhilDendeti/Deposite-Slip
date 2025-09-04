@@ -9,6 +9,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 from .slip_rule_parser import RuleBasedSlipParser
 from .llm_parser import LLMSlipParser
+from .gcv_client import GCVClient
 
 # Optional PaddleOCR import (graceful fallback if unavailable)
 try:
@@ -68,6 +69,7 @@ class OCRProcessor:
         self.rule_parser = RuleBasedSlipParser()
         self.llm_parser = LLMSlipParser()
         self.paddle_ocr = None
+        self.gcv_client = GCVClient()
         if _paddle_available:
             try:
                 self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
@@ -649,6 +651,10 @@ class OCRProcessor:
 
     async def process_deposit_slip(self, image_path: str, mode: str = "hybrid") -> Dict:
         print(f"🔍 OCRProcessor.process_deposit_slip: Starting with mode={mode}, file={image_path}")
+        # LLM mode disabled: fallback to OCR to keep flow working
+        if (mode or "").lower() == "llm":
+            print("⚠️ LLM mode is disabled; falling back to OCR mode")
+            mode = "ocr"
         try:
             total_start = time.perf_counter()
             lower_path = image_path.lower()
@@ -755,6 +761,40 @@ class OCRProcessor:
                                 'timings': {
                                     'ocr_text_ms': ocr_text_ms,
                                     'vision_ms': vision_ms
+                                }
+                            }
+                        }
+                    elif mode == "gcv":
+                        print("🧭 USING GOOGLE CLOUD VISION (GCV) MODE")
+                        gcv_start = time.perf_counter()
+                        # Prefer the original rendered page image for GCV
+                        text_gcv, conf_gcv = await self.gcv_client.detect_text_from_cv2(page_image, feature_type="DOCUMENT_TEXT_DETECTION", language_hints=["en"])
+                        gcv_ms = int((time.perf_counter() - gcv_start) * 1000)
+                        gcv_best = {
+                            'amount': self.extract_amount(text_gcv),
+                            'date': self.extract_date(text_gcv),
+                            'bank_name': self.extract_bank_name(text_gcv),
+                            'account_number': self.extract_account_number(text_gcv),
+                            'raw_text': self._clean_text(text_gcv),
+                        }
+                        gcv_best['confidence'] = max(self.calculate_confidence(gcv_best), float(conf_gcv) if conf_gcv is not None else 0.0)
+                        extracted_data = {
+                            'amount': gcv_best.get('amount'),
+                            'date': gcv_best.get('date'),
+                            'bank_name': gcv_best.get('bank_name'),
+                            'account_number': gcv_best.get('account_number'),
+                            'raw_text': gcv_best.get('raw_text', ''),
+                            'confidence': gcv_best.get('confidence', 0.0),
+                            'processing_details': {
+                                'mode_used': 'gcv',
+                                'amount_source': 'gcv' if gcv_best.get('amount') else None,
+                                'date_source': 'gcv' if gcv_best.get('date') else None,
+                                'bank_source': 'gcv' if gcv_best.get('bank_name') else None,
+                                'account_source': 'gcv' if gcv_best.get('account_number') else None,
+                                'gcv_confidence': conf_gcv,
+                                'timings': {
+                                    'ocr_text_ms': ocr_text_ms,
+                                    'gcv_ms': gcv_ms
                                 }
                             }
                         }
@@ -873,6 +913,39 @@ class OCRProcessor:
                             'timings': {
                                 'ocr_text_ms': ocr_text_ms,
                                 'vision_ms': vision_ms
+                            }
+                        }
+                    }
+                elif mode == "gcv":
+                    gcv_start = time.perf_counter()
+                    # Use original image for GCV
+                    text_gcv, conf_gcv = await self.gcv_client.detect_text_from_cv2(original, feature_type="DOCUMENT_TEXT_DETECTION", language_hints=["en"])
+                    gcv_ms = int((time.perf_counter() - gcv_start) * 1000)
+                    gcv_best = {
+                        'amount': self.extract_amount(text_gcv),
+                        'date': self.extract_date(text_gcv),
+                        'bank_name': self.extract_bank_name(text_gcv),
+                        'account_number': self.extract_account_number(text_gcv),
+                        'raw_text': self._clean_text(text_gcv),
+                    }
+                    gcv_best['confidence'] = max(self.calculate_confidence(gcv_best), float(conf_gcv) if conf_gcv is not None else 0.0)
+                    extracted_data = {
+                        'amount': gcv_best.get('amount'),
+                        'date': gcv_best.get('date'),
+                        'bank_name': gcv_best.get('bank_name'),
+                        'account_number': gcv_best.get('account_number'),
+                        'raw_text': gcv_best.get('raw_text', ''),
+                        'confidence': gcv_best.get('confidence', 0.0),
+                        'processing_details': {
+                            'mode_used': 'gcv',
+                            'amount_source': 'gcv' if gcv_best.get('amount') else None,
+                            'date_source': 'gcv' if gcv_best.get('date') else None,
+                            'bank_source': 'gcv' if gcv_best.get('bank_name') else None,
+                            'account_source': 'gcv' if gcv_best.get('account_number') else None,
+                            'gcv_confidence': conf_gcv,
+                            'timings': {
+                                'ocr_text_ms': ocr_text_ms,
+                                'gcv_ms': gcv_ms
                             }
                         }
                     }
