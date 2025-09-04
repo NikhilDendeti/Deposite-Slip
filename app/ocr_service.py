@@ -777,20 +777,52 @@ class OCRProcessor:
                             'account_number': self.extract_account_number(text_gcv),
                             'raw_text': self._clean_text(text_gcv),
                         }
-                        gcv_best['confidence'] = max(self.calculate_confidence(gcv_best), float(conf_gcv) if conf_gcv is not None else 0.0)
-                        extracted_data = {
-                            'amount': gcv_best.get('amount'),
-                            'date': gcv_best.get('date'),
-                            'bank_name': gcv_best.get('bank_name'),
-                            'account_number': gcv_best.get('account_number'),
+                        # Optional OpenAI post-processing
+                        openai_amount = None
+                        openai_date = None
+                        openai_bank = None
+                        openai_acct = None
+                        try:
+                            parsed, _raw = await self.gcv_client.post_process_with_openai(text_gcv)
+                            if parsed:
+                                try:
+                                    a = parsed.get('amount')
+                                    if a is not None:
+                                        openai_amount = float(a)
+                                except Exception:
+                                    openai_amount = None
+                                d = parsed.get('date')
+                                if d:
+                                    openai_date = str(d)
+                                openai_bank = parsed.get('bank_name') or None
+                                openai_acct = parsed.get('account_number') or None
+                        except Exception:
+                            pass
+                        merged_amount = openai_amount if openai_amount is not None else gcv_best.get('amount')
+                        merged_date = openai_date if openai_date else gcv_best.get('date')
+                        merged_bank = openai_bank if openai_bank else gcv_best.get('bank_name')
+                        merged_acct = openai_acct if openai_acct else gcv_best.get('account_number')
+                        merged = {
+                            'amount': merged_amount,
+                            'date': merged_date,
+                            'bank_name': merged_bank,
+                            'account_number': merged_acct,
                             'raw_text': gcv_best.get('raw_text', ''),
-                            'confidence': gcv_best.get('confidence', 0.0),
+                        }
+                        merged['confidence'] = max(self.calculate_confidence(merged), float(conf_gcv) if conf_gcv is not None else 0.0)
+                        extracted_data = {
+                            'amount': merged.get('amount'),
+                            'date': merged.get('date'),
+                            'bank_name': merged.get('bank_name'),
+                            'account_number': merged.get('account_number'),
+                            'raw_text': merged.get('raw_text', ''),
+                            'confidence': merged.get('confidence', 0.0),
                             'processing_details': {
                                 'mode_used': 'gcv',
-                                'amount_source': 'gcv' if gcv_best.get('amount') else None,
-                                'date_source': 'gcv' if gcv_best.get('date') else None,
-                                'bank_source': 'gcv' if gcv_best.get('bank_name') else None,
-                                'account_source': 'gcv' if gcv_best.get('account_number') else None,
+                                'amount_source': 'gcv_openai' if openai_amount is not None else ('gcv' if gcv_best.get('amount') else None),
+                                'date_source': 'gcv_openai' if openai_date else ('gcv' if gcv_best.get('date') else None),
+                                'bank_source': 'gcv_openai' if openai_bank else ('gcv' if gcv_best.get('bank_name') else None),
+                                'account_source': 'gcv_openai' if openai_acct else ('gcv' if gcv_best.get('account_number') else None),
                                 'gcv_confidence': conf_gcv,
                                 'timings': {
                                     'ocr_text_ms': ocr_text_ms,
@@ -928,20 +960,52 @@ class OCRProcessor:
                         'account_number': self.extract_account_number(text_gcv),
                         'raw_text': self._clean_text(text_gcv),
                     }
-                    gcv_best['confidence'] = max(self.calculate_confidence(gcv_best), float(conf_gcv) if conf_gcv is not None else 0.0)
-                    extracted_data = {
-                        'amount': gcv_best.get('amount'),
-                        'date': gcv_best.get('date'),
-                        'bank_name': gcv_best.get('bank_name'),
-                        'account_number': gcv_best.get('account_number'),
+                    # Optional OpenAI post-processing
+                    openai_amount = None
+                    openai_date = None
+                    openai_bank = None
+                    openai_acct = None
+                    try:
+                        parsed, _raw = await self.gcv_client.post_process_with_openai(text_gcv)
+                        if parsed:
+                            try:
+                                a = parsed.get('amount')
+                                if a is not None:
+                                    openai_amount = float(a)
+                            except Exception:
+                                openai_amount = None
+                            d = parsed.get('date')
+                            if d:
+                                openai_date = str(d)
+                            openai_bank = parsed.get('bank_name') or None
+                            openai_acct = parsed.get('account_number') or None
+                    except Exception:
+                        pass
+                    merged_amount = openai_amount if openai_amount is not None else gcv_best.get('amount')
+                    merged_date = openai_date if openai_date else gcv_best.get('date')
+                    merged_bank = openai_bank if openai_bank else gcv_best.get('bank_name')
+                    merged_acct = openai_acct if openai_acct else gcv_best.get('account_number')
+                    merged = {
+                        'amount': merged_amount,
+                        'date': merged_date,
+                        'bank_name': merged_bank,
+                        'account_number': merged_acct,
                         'raw_text': gcv_best.get('raw_text', ''),
-                        'confidence': gcv_best.get('confidence', 0.0),
+                    }
+                    merged['confidence'] = max(self.calculate_confidence(merged), float(conf_gcv) if conf_gcv is not None else 0.0)
+                    extracted_data = {
+                        'amount': merged.get('amount'),
+                        'date': merged.get('date'),
+                        'bank_name': merged.get('bank_name'),
+                        'account_number': merged.get('account_number'),
+                        'raw_text': gcv_best.get('raw_text', ''),
+                        'confidence': merged.get('confidence', 0.0),
                         'processing_details': {
                             'mode_used': 'gcv',
-                            'amount_source': 'gcv' if gcv_best.get('amount') else None,
-                            'date_source': 'gcv' if gcv_best.get('date') else None,
-                            'bank_source': 'gcv' if gcv_best.get('bank_name') else None,
-                            'account_source': 'gcv' if gcv_best.get('account_number') else None,
+                            'amount_source': 'gcv_openai' if openai_amount is not None else ('gcv' if gcv_best.get('amount') else None),
+                            'date_source': 'gcv_openai' if openai_date else ('gcv' if gcv_best.get('date') else None),
+                            'bank_source': 'gcv_openai' if openai_bank else ('gcv' if gcv_best.get('bank_name') else None),
+                            'account_source': 'gcv_openai' if openai_acct else ('gcv' if gcv_best.get('account_number') else None),
                             'gcv_confidence': conf_gcv,
                             'timings': {
                                 'ocr_text_ms': ocr_text_ms,
