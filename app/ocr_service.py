@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 import pytesseract
 import re
+import time
 from typing import Dict, Optional, List
 from pathlib import Path
 import fitz  # PyMuPDF
@@ -22,10 +23,12 @@ class OCRProcessor:
         # pytesseract.pytesseract.tesseract_cmd = r'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'
 
         self.amount_patterns = [
-            r'amount[:\s]*[\$]?([0-9,]+\.?[0-9]*)',
-            r'total[:\s]*[\$]?([0-9,]+\.?[0-9]*)',
-            r'deposit[:\s]*[\$]?([0-9,]+\.?[0-9]*)',
-            r'[\$]([0-9,]+\.[0-9]{2})',
+            # Label-based with optional currency markers (₹, Rs, INR, $)
+            r'(?:amount|total|deposit)[:\s]*[₹\$]?\s*(?:rs\.?|inr)?\s*([0-9,]+\.?[0-9]*)',
+            # Standalone currency symbol before amount
+            r'[₹\$]\s*([0-9,]+(?:\.[0-9]{1,2})?)',
+            # Prefix currency code/word (Rs., INR)
+            r'(?:rs\.?|inr)\s*([0-9,]+(?:\.[0-9]{1,2})?)',
         ]
 
         self.date_patterns = [
@@ -35,12 +38,32 @@ class OCRProcessor:
         ]
 
         self.bank_patterns = {
-            'SBI': r'state\s+bank\s+of\s+india|sbi',
-            'HDFC': r'hdfc\s+bank|hdfc',
-            'ICICI': r'icici\s+bank|icici',
-            'AXIS': r'axis\s+bank|axis',
-            'PNB': r'punjab\s+national\s+bank|pnb',
-            'DCB': r'dcb\s*bank',
+            'SBI': r'state\s+bank\s+of\s+india|\bsbi\b',
+            'HDFC': r'hdfc\s+bank|\bhdfc\b',
+            'ICICI': r'icici\s+bank|\bicici\b',
+            'AXIS': r'axis\s+bank|\baxis\b',
+            'PNB': r'punjab\s+national\s+bank|punjab\s+national|\bpnb\b',
+            'DCB': r'dcb\s*bank|\bdcb\b',
+            'BOB': r'bank\s+of\s+baroda|\bbob\b',
+            'BOI': r'bank\s+of\s+india\b|\bboi\b',
+            'CANARA': r'canara\s+bank',
+            'KOTAK': r'kotak\s+mahindra\s+bank|\bkotak\b',
+            'YES': r'yes\s+bank\b',
+            'UNION': r'union\s+bank\s+of\s+india|union\s+bank',
+            'IDBI': r'idbi\s+bank|\bidbi\b',
+            'INDUSIND': r'indusind\s+bank|indus\s*ind',
+            'FEDERAL': r'federal\s+bank\b',
+            'RBL': r'rbl\s+bank\b',
+            'BANDHAN': r'bandhan\s+bank\b',
+            'AU': r'au\s+small\s+finance\s+bank|\bau\b',
+            'UCO': r'uco\s+bank\b',
+            'CENTRAL': r'central\s+bank\s+of\s+india|central\s+bank',
+            'INDIANBANK': r'indian\s+bank\b',
+            'IOB': r'indian\s+overseas\s+bank|\biob\b',
+            'KVB': r'karur\s+vysya\s+bank|\bkvb\b',
+            'SIB': r'south\s+indian\s+bank|\bsib\b',
+            'IDFC': r'idfc\s+first\s+bank|\bidfc\b',
+            'CSB': r'catholic\s+syrian\s+bank|\bcsb\b',
         }
         self.rule_parser = RuleBasedSlipParser()
         self.llm_parser = LLMSlipParser()
@@ -53,6 +76,32 @@ class OCRProcessor:
                 self.paddle_ocr = None
 
     # --- Image preprocessing helpers --------------------------------------------------------
+    def _rotate_image(self, image: np.ndarray, angle_deg: float) -> np.ndarray:
+        try:
+            bgr = self._ensure_bgr(image)
+            h, w = bgr.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+            rotated = cv2.warpAffine(bgr, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            return rotated
+        except Exception:
+            return image
+
+    def _detect_and_rotate_upright(self, image: np.ndarray) -> np.ndarray:
+        """Attempt to detect orientation with Tesseract OSD and rotate upright."""
+        try:
+            bgr = self._ensure_bgr(image)
+            osd = pytesseract.image_to_osd(bgr, config='--psm 0 -l eng')
+            # Typical OSD contains a line like: "Rotate: 90"
+            match = re.search(r"Rotate:\s*(\d+)", osd)
+            if match:
+                rot = int(match.group(1)) % 360
+                if rot != 0:
+                    # Rotate in the opposite direction to make it upright
+                    return self._rotate_image(bgr, -rot)
+            return bgr
+        except Exception:
+            return image
     def _ensure_bgr(self, image: np.ndarray) -> np.ndarray:
         """Guarantee a 3-channel BGR image for OCR engines that expect color input."""
         if image is None:
@@ -101,10 +150,32 @@ class OCRProcessor:
         """Generate multiple processed variants to increase OCR robustness."""
         variants: List[np.ndarray] = []
         bgr = self._ensure_bgr(image)
-        variants.append(bgr)
+
+        # Try to correct orientation first
+        upright = self._detect_and_rotate_upright(bgr)
+
+        # Add base rotations (0/90/180/270)
+        base_rotations: List[np.ndarray] = [
+            upright,
+            cv2.rotate(upright, cv2.ROTATE_90_CLOCKWISE),
+            cv2.rotate(upright, cv2.ROTATE_180),
+            cv2.rotate(upright, cv2.ROTATE_90_COUNTERCLOCKWISE),
+        ]
+
+        # Mild denoising to reduce background speckle
+        denoised_rots: List[np.ndarray] = []
+        for base in base_rotations:
+            try:
+                den = cv2.fastNlMeansDenoisingColored(self._ensure_bgr(base), None, 5, 5, 7, 21)
+                denoised_rots.append(den)
+            except Exception:
+                denoised_rots.append(self._ensure_bgr(base))
+
+        for base in denoised_rots:
+            variants.append(base)
 
         # Grayscale and CLAHE
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(upright, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray_clahe = clahe.apply(gray)
 
@@ -134,7 +205,7 @@ class OCRProcessor:
             scale = 2.0
         else:
             scale = 1.5
-        up_bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+        up_bgr = cv2.resize(upright, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
         up_otsu = cv2.resize(close, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
         # Unsharp masking for clarity
@@ -185,7 +256,7 @@ class OCRProcessor:
             return [left, right]
         return [bgr]
 
-    def render_pdf_to_images(self, pdf_path: str, dpi: int = 200) -> List[np.ndarray]:
+    def render_pdf_to_images(self, pdf_path: str, dpi: int = 300) -> List[np.ndarray]:
         images: List[np.ndarray] = []
         doc = fitz.open(pdf_path)
         try:
@@ -200,14 +271,39 @@ class OCRProcessor:
             doc.close()
         return images
 
+    def _clean_text(self, text: str) -> str:
+        """Remove obviously noisy lines and normalize spacing."""
+        if not text:
+            return ""
+        cleaned_lines: List[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            alnum_count = len(re.findall(r"[A-Za-z0-9]", line))
+            # Skip lines with too few alphanumerics or mostly punctuation
+            if alnum_count < 3:
+                continue
+            non_alnum = len(re.findall(r"[^A-Za-z0-9]", line))
+            if non_alnum > 0 and non_alnum / max(len(line), 1) > 0.6:
+                continue
+            # Skip lines that are mostly the same character repeated
+            if re.search(r"^(.)\1{4,}$", re.sub(r"\s+", "", line)):
+                continue
+            # Compress internal spaces
+            line = re.sub(r"\s+", " ", line)
+            cleaned_lines.append(line)
+        return "\n".join(cleaned_lines).strip()
+
     def extract_text(self, image: np.ndarray) -> str:
         """Run OCR with several configs and optionally PaddleOCR, pick the longest output."""
+        whitelist = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,-/: ₹'
         configs = [
-            '-l eng --oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,-/: ',
-            '-l eng --oem 1 --psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,-/: ',
-            '-l eng --oem 1 --psm 11 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,-/: ',
-            '-l eng --oem 3 --psm 4',
-            '-l eng --oem 1 --psm 12'
+            f'-l eng --oem 1 --psm 6 -c tessedit_char_whitelist={whitelist} -c preserve_interword_spaces=1 -c user_defined_dpi=300',
+            f'-l eng --oem 1 --psm 7 -c tessedit_char_whitelist={whitelist} -c preserve_interword_spaces=1 -c user_defined_dpi=300',
+            f'-l eng --oem 1 --psm 11 -c tessedit_char_whitelist={whitelist} -c preserve_interword_spaces=1 -c user_defined_dpi=300',
+            '-l eng --oem 3 --psm 4 -c preserve_interword_spaces=1 -c user_defined_dpi=300',
+            '-l eng --oem 1 --psm 12 -c preserve_interword_spaces=1 -c user_defined_dpi=300'
         ]
         best_text = ''
         # Tesseract on the given image
@@ -237,7 +333,7 @@ class OCRProcessor:
             except Exception:
                 pass
 
-        return best_text
+        return self._clean_text(best_text)
 
     def _extract_best_from_variants(self, images: List[np.ndarray]) -> str:
         """Run OCR across multiple image variants and return the most informative text."""
@@ -247,6 +343,64 @@ class OCRProcessor:
             if len(text) > len(best_text):
                 best_text = text
         return best_text
+
+    def _extract_best_data_from_variants_ocr(self, images: List[np.ndarray]) -> Dict:
+        """Run OCR across variants and aggregate with field-wise voting for robustness."""
+        best_by_conf: Optional[Dict] = None
+        amount_votes: Dict[str, int] = {}
+        date_votes: Dict[str, int] = {}
+        bank_votes: Dict[str, int] = {}
+        acct_votes: Dict[str, int] = {}
+        representative_text = ''
+
+        for img in images:
+            text = self.extract_text(img)
+            amount = self.extract_amount(text)
+            date_val = self.extract_date(text)
+            bank = self.extract_bank_name(text)
+            acct = self.extract_account_number(text)
+            data = {
+                'amount': amount,
+                'date': date_val,
+                'bank_name': bank,
+                'account_number': acct,
+                'raw_text': text,
+            }
+            conf = self.calculate_confidence(data)
+            data['confidence'] = conf
+            if best_by_conf is None or conf > best_by_conf.get('confidence', 0.0):
+                best_by_conf = data
+                representative_text = text
+            if amount is not None:
+                key = f"{amount:.2f}"
+                amount_votes[key] = amount_votes.get(key, 0) + 1
+            if date_val:
+                date_votes[date_val] = date_votes.get(date_val, 0) + 1
+            if bank:
+                bank_votes[bank] = bank_votes.get(bank, 0) + 1
+            if acct:
+                acct_votes[acct] = acct_votes.get(acct, 0) + 1
+
+        def pick_majority(votes: Dict[str, int]) -> Optional[str]:
+            if not votes:
+                return None
+            return max(votes.items(), key=lambda kv: kv[1])[0]
+
+        majority_amount_key = pick_majority(amount_votes)
+        majority_amount = float(majority_amount_key) if majority_amount_key else None
+        majority_date = pick_majority(date_votes)
+        majority_bank = pick_majority(bank_votes)
+        majority_acct = pick_majority(acct_votes)
+
+        aggregated = {
+            'amount': majority_amount if majority_amount is not None else (best_by_conf.get('amount') if best_by_conf else None),
+            'date': majority_date if majority_date else (best_by_conf.get('date') if best_by_conf else None),
+            'bank_name': majority_bank if majority_bank else (best_by_conf.get('bank_name') if best_by_conf else None),
+            'account_number': majority_acct if majority_acct else (best_by_conf.get('account_number') if best_by_conf else None),
+            'raw_text': representative_text if representative_text else (best_by_conf.get('raw_text') if best_by_conf else ''),
+        }
+        aggregated['confidence'] = self.calculate_confidence(aggregated)
+        return aggregated
 
     def extract_amount(self, text: str) -> Optional[float]:
         if not text:
@@ -269,13 +423,26 @@ class OCRProcessor:
             return s.translate(table)
 
         normalized = normalize_digits_like(text)
+
+        denom_cues = [
+            r"\bdenomination\b", r"\bcoins?\b", r"\bnotes?\b",
+            r"\b(2000|1000|500|200|100|50|20|10|5|2|1)\s*[xX*]\s*\d+\b",
+        ]
+
+        def is_denom_context(span_start: int, span_end: int, haystack: str) -> bool:
+            window = haystack[max(0, span_start - 60): min(len(haystack), span_end + 60)]
+            for cue in denom_cues:
+                if re.search(cue, window, re.IGNORECASE):
+                    return True
+            return False
+
         for pattern in self.amount_patterns:
             matches = re.finditer(pattern, text_lower, re.IGNORECASE)
             for match in matches:
                 try:
                     amount_str = match.group(1).replace(',', '')
                     amount = float(amount_str)
-                    if 0.01 <= amount <= 10000000:
+                    if 0.01 <= amount <= 10000000 and not is_denom_context(match.start(), match.end(), text_lower):
                         return amount
                 except (ValueError, IndexError):
                     continue
@@ -286,7 +453,7 @@ class OCRProcessor:
                     amount_str = match.group(1).replace(',', '')
                     amount_str = re.sub(r"[^0-9.]+", "", amount_str)
                     amount = float(amount_str)
-                    if 0.01 <= amount <= 10000000:
+                    if 0.01 <= amount <= 10000000 and not is_denom_context(match.start(), match.end(), normalized):
                         return amount
                 except (ValueError, IndexError):
                     continue
@@ -295,28 +462,139 @@ class OCRProcessor:
     def extract_date(self, text: str) -> Optional[str]:
         if not text:
             return None
-        for pattern in self.date_patterns:
-            matches = re.search(pattern, text, re.IGNORECASE)
+        # First try label-based forms with OCR confusions
+        def normalize_date_chars(s: str) -> str:
+            table = str.maketrans({
+                'O': '0', 'o': '0',
+                'l': '1', 'I': '1', '|': '1',
+                'S': '5', 's': '5',
+                'B': '8', 'b': '8',
+            })
+            return s.translate(table)
+
+        text_norm = normalize_date_chars(text)
+
+        label_patterns = [
+            r'(?:date|dated|dt)\s*[:\-]?\s*([0-9OolS]{1,2}[./\-][0-9OolS]{1,2}[./\-][0-9OolS]{2,4})',
+            r'(?:date|dated|dt)\s*[:\-]?\s*([0-9]{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s*[0-9]{2,4})',
+        ]
+        for pat in label_patterns:
+            m = re.search(pat, text_norm, re.IGNORECASE)
+            if m:
+                return self.standardize_date(m.group(1))
+
+        # Then try general patterns on normalized text
+        extra_patterns = [
+            r'(\d{1,2}[.\-]\d{1,2}[.\-]\d{2,4})',
+            r'(\d{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s*\d{2,4})',
+        ] + self.date_patterns
+        for pattern in extra_patterns:
+            matches = re.search(pattern, text_norm, re.IGNORECASE)
             if matches:
                 date_str = matches.group(1)
                 return self.standardize_date(date_str)
         return None
 
-    def standardize_date(self, date_str: str) -> str:
+    def standardize_date(self, date_str: str) -> Optional[str]:
         from datetime import datetime
+        import difflib
+        # First: straightforward formats (Indian first)
         formats = [
-            '%m/%d/%Y', '%d/%m/%Y', '%Y/%m/%d',
-            '%m-%d-%Y', '%d-%m-%Y', '%Y-%m-%d',
-            '%m/%d/%y', '%d/%m/%y', '%y/%m/%d',
-            '%m-%d-%y', '%d-%m-%y', '%y-%m-%d',
+            '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y',
+            '%d/%m/%y', '%d-%m-%y', '%d.%m.%y',
+            '%Y-%m-%d', '%Y/%m/%d',
+            '%m/%d/%Y', '%m-%d-%Y', '%m/%d/%y', '%m-%d-%y',
         ]
+        s = (date_str or '').strip()
         for fmt in formats:
             try:
-                date_obj = datetime.strptime(date_str, fmt)
+                date_obj = datetime.strptime(s, fmt)
                 return date_obj.strftime('%Y-%m-%d')
             except ValueError:
                 continue
-        return date_str
+        # Second: textual months with separators
+        text_formats = [
+            '%d %b %Y', '%d %b %y', '%d %B %Y', '%d %B %y',
+            '%d-%b-%Y', '%d-%b-%y', '%d-%B-%Y', '%d-%B-%y',
+            '%d.%b.%Y', '%d.%b.%y', '%d.%B.%Y', '%d.%B.%y',
+        ]
+        s_norm_spaces = re.sub(r"\s+", " ", s)
+        for fmt in text_formats:
+            try:
+                date_obj = datetime.strptime(s_norm_spaces, fmt)
+                return date_obj.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+        # Third: robust cleanup for OCR-noisy tokens like "2JANDDE51"
+        if s:
+            # Normalize confusable glyphs
+            trans = str.maketrans({'O': '0', 'o': '0', 'l': '1', 'I': '1', '|': '1', 'S': '5', 'B': '8'})
+            s2 = s.translate(trans)
+            # Insert separators between digits and letters
+            s2 = re.sub(r'(?<=\d)(?=[A-Za-z])', '-', s2)
+            s2 = re.sub(r'(?<=[A-Za-z])(?=\d)', '-', s2)
+            # Collapse repeated letters
+            s2 = re.sub(r'([A-Za-z])\1{1,}', r'\1', s2)
+            # Keep only alnum and dashes/spaces
+            s2 = re.sub(r'[^A-Za-z0-9\-\s]', '', s2)
+            tokens = [t for t in re.split(r'[\s\-]+', s2) if t]
+            if len(tokens) >= 2:
+                # Expect day, month(word/num), year(optional)
+                day_token = tokens[0]
+                month_token = tokens[1]
+                year_token = tokens[2] if len(tokens) >= 3 else ''
+                # Fuzzy month mapping
+                month_map = {
+                    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                    'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+                }
+                mtok = re.sub(r'[^A-Za-z]', '', month_token).lower()
+                mtok = re.sub(r'(.)\1+', r'\1', mtok)
+                month_num: Optional[int] = None
+                if mtok.isdigit():
+                    try:
+                        month_num = int(mtok)
+                    except Exception:
+                        month_num = None
+                else:
+                    choices = list(month_map.keys())
+                    close = difflib.get_close_matches(mtok, choices, n=1, cutoff=0.5)
+                    if close:
+                        month_num = month_map[close[0]]
+                # Parse day
+                try:
+                    day_num = int(re.sub(r'\D', '', day_token))
+                except Exception:
+                    day_num = None
+                # Parse year (assume 20YY for 2-digit)
+                ydigits = re.sub(r'\D', '', year_token)
+                year_num: Optional[int] = None
+                if ydigits:
+                    try:
+                        y = int(ydigits)
+                        if y < 100:
+                            year_num = 2000 + y
+                        else:
+                            year_num = y
+                    except Exception:
+                        year_num = None
+                # If year missing but there is a plausible 4-digit elsewhere, try to pick it
+                if year_num is None and len(tokens) >= 4:
+                    y2 = re.sub(r'\D', '', tokens[3])
+                    if len(y2) in (2, 4):
+                        try:
+                            y = int(y2)
+                            year_num = 2000 + y if y < 100 else y
+                        except Exception:
+                            pass
+                if day_num and month_num and 1 <= day_num <= 31 and 1 <= month_num <= 12 and year_num:
+                    try:
+                        dt = datetime(year_num, month_num, day_num)
+                        return dt.strftime('%Y-%m-%d')
+                    except ValueError:
+                        pass
+        # Give up
+        return None
 
     def extract_bank_name(self, text: str) -> Optional[str]:
         if not text:
@@ -372,6 +650,7 @@ class OCRProcessor:
     async def process_deposit_slip(self, image_path: str, mode: str = "hybrid") -> Dict:
         print(f"🔍 OCRProcessor.process_deposit_slip: Starting with mode={mode}, file={image_path}")
         try:
+            total_start = time.perf_counter()
             lower_path = image_path.lower()
             if lower_path.endswith('.pdf'):
                 print(f"📄 PDF DETECTED: Processing PDF file")
@@ -381,36 +660,52 @@ class OCRProcessor:
                 print(f"📄 PDF RENDERED: {len(page_images)} pages")
 
                 best_data: Optional[Dict] = None
+                best_conf = -1.0
                 for i, page_image in enumerate(page_images):
                     print(f"📄 PROCESSING PAGE {i+1}/{len(page_images)}")
                     # Try page, its halves, and multiple preprocess variants
+                    ocr_text_start = time.perf_counter()
                     candidates: List[np.ndarray] = []
                     for sub in self._maybe_split_halves(page_image):
                         candidates.extend(self._generate_variants(sub))
-                    text = self._extract_best_from_variants(candidates)
-                    print(f"📝 EXTRACTED TEXT (page {i+1}): {text[:100]}...")
+                    # Prefer text from the best-scoring variant by field-confidence
+                    best_data_for_ocr = self._extract_best_data_from_variants_ocr(candidates)
+                    text = best_data_for_ocr.get('raw_text', '') or self._extract_best_from_variants(candidates)
+                    ocr_text_ms = int((time.perf_counter() - ocr_text_start) * 1000)
+                    # Print full OCR text for inspection
+                    try:
+                        print(f"📝 FULL OCR TEXT (page {i+1}):\n{text}\n--- END PAGE {i+1} ---")
+                        print("__________________________________________________________________")
+                        print(f"⏱ OCR(text) time (page {i+1}): {ocr_text_ms} ms")
+                    except Exception:
+                        pass
                     if mode == "ocr":
                         print(f"🔍 USING OCR MODE")
+                        best_variant_data = best_data_for_ocr
                         extracted_data = {
-                            'amount': self.extract_amount(text),
-                            'date': self.extract_date(text),
-                            'bank_name': self.extract_bank_name(text),
-                            'account_number': self.extract_account_number(text),
-                            'raw_text': text,
-                            'confidence': 0.0,
+                            'amount': best_variant_data.get('amount'),
+                            'date': best_variant_data.get('date'),
+                            'bank_name': best_variant_data.get('bank_name'),
+                            'account_number': best_variant_data.get('account_number'),
+                            'raw_text': best_variant_data.get('raw_text', text),
+                            'confidence': best_variant_data.get('confidence', 0.0),
                             'processing_details': {
                                 'mode_used': 'ocr',
-                                'amount_source': 'ocr' if self.extract_amount(text) else None,
-                                'date_source': 'ocr' if self.extract_date(text) else None,
-                                'bank_source': 'ocr' if self.extract_bank_name(text) else None,
-                                'account_source': 'ocr' if self.extract_account_number(text) else None,
-                                'ocr_confidence': self.calculate_confidence(extracted_data)
+                                'amount_source': 'ocr' if best_variant_data.get('amount') else None,
+                                'date_source': 'ocr' if best_variant_data.get('date') else None,
+                                'bank_source': 'ocr' if best_variant_data.get('bank_name') else None,
+                                'account_source': 'ocr' if best_variant_data.get('account_number') else None,
+                                'ocr_confidence': best_variant_data.get('confidence', 0.0),
+                                'timings': {
+                                    'ocr_text_ms': ocr_text_ms
+                                }
                             }
                         }
-                        extracted_data['confidence'] = self.calculate_confidence(extracted_data)
                     elif mode == "llm":
                         print(f"🤖 USING LLM MODE")
+                        llm_start = time.perf_counter()
                         llm_data, llm_conf = await self.llm_parser.parse(text)
+                        llm_ms = int((time.perf_counter() - llm_start) * 1000)
                         print(f"🤖 LLM RESULT: {llm_data}, confidence: {llm_conf}")
                         extracted_data = {
                             'amount': llm_data.get('amount'),
@@ -425,7 +720,42 @@ class OCRProcessor:
                                 'date_source': 'llm' if llm_data.get('date') else None,
                                 'bank_source': 'llm' if llm_data.get('bank_name') else None,
                                 'account_source': 'llm' if llm_data.get('account_number') else None,
-                                'llm_confidence': llm_conf
+                                'llm_confidence': llm_conf,
+                                'timings': {
+                                    'ocr_text_ms': ocr_text_ms,
+                                    'llm_ms': llm_ms
+                                }
+                            }
+                        }
+                    elif mode == "vision":
+                        print(f"🖼️ USING VISION MODE")
+                        # Use original page image for vision model
+                        vision_start = time.perf_counter()
+                        # Provide multiple variants and OCR text as hint to vision model
+                        images_for_vision: List[np.ndarray] = [page_image]
+                        for sub in self._maybe_split_halves(page_image):
+                            images_for_vision.extend(self._generate_variants(sub)[:2])
+                        vision_data, vision_conf = await self.llm_parser.parse_images_cv(images_for_vision[:4], text)
+                        vision_ms = int((time.perf_counter() - vision_start) * 1000)
+                        print(f"🖼️ VISION RESULT: {vision_data}, confidence: {vision_conf}")
+                        extracted_data = {
+                            'amount': vision_data.get('amount'),
+                            'date': vision_data.get('date'),
+                            'bank_name': vision_data.get('bank_name'),
+                            'account_number': vision_data.get('account_number'),
+                            'raw_text': text,
+                            'confidence': vision_conf,
+                            'processing_details': {
+                                'mode_used': 'vision',
+                                'amount_source': 'vision' if vision_data.get('amount') is not None else None,
+                                'date_source': 'vision' if vision_data.get('date') else None,
+                                'bank_source': 'vision' if vision_data.get('bank_name') else None,
+                                'account_source': 'vision' if vision_data.get('account_number') else None,
+                                'llm_confidence': vision_conf,
+                                'timings': {
+                                    'ocr_text_ms': ocr_text_ms,
+                                    'vision_ms': vision_ms
+                                }
                             }
                         }
                     else:
@@ -438,8 +768,13 @@ class OCRProcessor:
                             'confidence': 0.0
                         }
                         extracted_data['confidence'] = self.calculate_confidence(extracted_data)
-                    if best_data is None or extracted_data['confidence'] > best_data['confidence']:
+                    if extracted_data['confidence'] > best_conf:
+                        best_conf = extracted_data['confidence']
                         best_data = extracted_data
+                total_ms = int((time.perf_counter() - total_start) * 1000)
+                if best_data is not None:
+                    best_data.setdefault('processing_details', {}).setdefault('timings', {})['total_ms'] = total_ms
+                    print(f"⏱ Total processing time: {total_ms} ms")
                 return best_data if best_data is not None else {
                     'amount': None,
                     'date': None,
@@ -453,46 +788,93 @@ class OCRProcessor:
                 original = cv2.imread(image_path)
                 if original is None:
                     raise ValueError(f"Could not read image: {image_path}")
+                ocr_text_start = time.perf_counter()
                 candidates: List[np.ndarray] = []
                 for sub in self._maybe_split_halves(original):
                     candidates.extend(self._generate_variants(sub))
-                text = self._extract_best_from_variants(candidates)
+                # Prefer text from the best-scoring variant by field-confidence
+                best_data_for_ocr = self._extract_best_data_from_variants_ocr(candidates)
+                text = best_data_for_ocr.get('raw_text', '') or self._extract_best_from_variants(candidates)
+                ocr_text_ms = int((time.perf_counter() - ocr_text_start) * 1000)
+                # Print full OCR text for inspection
+                try:
+                    print(f"📝 FULL OCR TEXT:\n{text}\n--- END OCR TEXT ---")
+                    print("__________________________________________________________________")
+                    print(f"⏱ OCR(text) time: {ocr_text_ms} ms")
+                except Exception:
+                    pass
                 if mode == "ocr":
+                    best_variant_data = best_data_for_ocr
                     extracted_data = {
-                        'amount': self.extract_amount(text),
-                        'date': self.extract_date(text),
-                        'bank_name': self.extract_bank_name(text),
-                        'account_number': self.extract_account_number(text),
-                        'raw_text': text,
-                        'confidence': self.calculate_confidence({
-                            'amount': self.extract_amount(text),
-                            'date': self.extract_date(text),
-                            'bank_name': self.extract_bank_name(text),
-                            'account_number': self.extract_account_number(text)
-                        }),
+                        'amount': best_variant_data.get('amount'),
+                        'date': best_variant_data.get('date'),
+                        'bank_name': best_variant_data.get('bank_name'),
+                        'account_number': best_variant_data.get('account_number'),
+                        'raw_text': best_variant_data.get('raw_text', text),
+                        'confidence': best_variant_data.get('confidence', 0.0),
                         'processing_details': {
                             'mode_used': 'ocr',
-                            'amount_source': 'ocr' if self.extract_amount(text) else None,
-                            'date_source': 'ocr' if self.extract_date(text) else None,
-                            'bank_source': 'ocr' if self.extract_bank_name(text) else None,
-                            'account_source': 'ocr' if self.extract_account_number(text) else None,
-                            'ocr_confidence': self.calculate_confidence({
-                                'amount': self.extract_amount(text),
-                                'date': self.extract_date(text),
-                                'bank_name': self.extract_bank_name(text),
-                                'account_number': self.extract_account_number(text)
-                            })
+                            'amount_source': 'ocr' if best_variant_data.get('amount') else None,
+                            'date_source': 'ocr' if best_variant_data.get('date') else None,
+                            'bank_source': 'ocr' if best_variant_data.get('bank_name') else None,
+                            'account_source': 'ocr' if best_variant_data.get('account_number') else None,
+                            'ocr_confidence': best_variant_data.get('confidence', 0.0),
+                            'timings': {
+                                'ocr_text_ms': ocr_text_ms
+                            }
                         }
                     }
                 elif mode == "llm":
+                    llm_start = time.perf_counter()
                     llm_data, llm_conf = await self.llm_parser.parse(text)
+                    llm_ms = int((time.perf_counter() - llm_start) * 1000)
                     extracted_data = {
                         'amount': llm_data.get('amount'),
                         'date': llm_data.get('date'),
                         'bank_name': llm_data.get('bank_name'),
                         'account_number': llm_data.get('account_number'),
                         'raw_text': text,
-                        'confidence': llm_conf
+                        'confidence': llm_conf,
+                        'processing_details': {
+                            'mode_used': 'llm',
+                            'amount_source': 'llm' if llm_data.get('amount') else None,
+                            'date_source': 'llm' if llm_data.get('date') else None,
+                            'bank_source': 'llm' if llm_data.get('bank_name') else None,
+                            'account_source': 'llm' if llm_data.get('account_number') else None,
+                            'llm_confidence': llm_conf,
+                            'timings': {
+                                'ocr_text_ms': ocr_text_ms,
+                                'llm_ms': llm_ms
+                            }
+                        }
+                    }
+                elif mode == "vision":
+                    vision_start = time.perf_counter()
+                    # Provide multiple variants and OCR text as hint to vision model
+                    images_for_vision: List[np.ndarray] = [original]
+                    for sub in self._maybe_split_halves(original):
+                        images_for_vision.extend(self._generate_variants(sub)[:2])
+                    vision_data, vision_conf = await self.llm_parser.parse_images_cv(images_for_vision[:4], text)
+                    vision_ms = int((time.perf_counter() - vision_start) * 1000)
+                    extracted_data = {
+                        'amount': vision_data.get('amount'),
+                        'date': vision_data.get('date'),
+                        'bank_name': vision_data.get('bank_name'),
+                        'account_number': vision_data.get('account_number'),
+                        'raw_text': text,
+                        'confidence': vision_conf,
+                        'processing_details': {
+                            'mode_used': 'vision',
+                            'amount_source': 'vision' if vision_data.get('amount') is not None else None,
+                            'date_source': 'vision' if vision_data.get('date') else None,
+                            'bank_source': 'vision' if vision_data.get('bank_name') else None,
+                            'account_source': 'vision' if vision_data.get('account_number') else None,
+                            'llm_confidence': vision_conf,
+                            'timings': {
+                                'ocr_text_ms': ocr_text_ms,
+                                'vision_ms': vision_ms
+                            }
+                        }
                     }
                 else:
                     extracted_data = {
@@ -508,6 +890,9 @@ class OCRProcessor:
                             'account_number': self.extract_account_number(text)
                         })
                     }
+                total_ms = int((time.perf_counter() - total_start) * 1000)
+                extracted_data.setdefault('processing_details', {}).setdefault('timings', {})['total_ms'] = total_ms
+                print(f"⏱ Total processing time: {total_ms} ms")
                 return extracted_data
         except Exception as e:
             return {

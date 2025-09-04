@@ -57,6 +57,14 @@ class DepositSlipResponse(BaseModel):
     file_hash: Optional[str] = None
     ocr_amount: Optional[float]
     ocr_date: Optional[date]
+    # Neutral extracted fields (mode-agnostic). Mirrors chosen processing mode's outputs.
+    extracted_amount: Optional[float] = None
+    extracted_date: Optional[date] = None
+    # Mode-specific convenience fields (populated only for that mode in stateless responses)
+    llm_amount: Optional[float] = None
+    llm_date: Optional[date] = None
+    vision_amount: Optional[float] = None
+    vision_date: Optional[date] = None
     manual_amount: Optional[float]
     manual_date: Optional[date]
     bank_name: Optional[str]

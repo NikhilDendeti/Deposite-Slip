@@ -63,9 +63,9 @@ async def upload_deposit_slip(
         #     print(f"❌ DUPLICATE FILE: already exists as deposit slip ID {existing.id}")
         #     raise HTTPException(status_code=400, detail="Duplicate deposit slip file detected")
 
-        # normalize mode (only 'ocr' and 'llm' supported)
+        # normalize mode (support 'ocr', 'llm', 'vision')
         mode_normalized = (mode or "ocr").lower()
-        if mode_normalized not in ("ocr", "llm"):
+        if mode_normalized not in ("ocr", "llm", "vision"):
             mode_normalized = "ocr"
         print(f"🔍 OCR PROCESSING START: mode={mode_normalized}")
         ocr_result = await ocr_processor.process_deposit_slip(str(file_path), mode=mode_normalized)
@@ -97,6 +97,24 @@ async def upload_deposit_slip(
         print(f"💾 DB SAVE SKIPPED: stateless preview mode")
         now_dt = _dt.utcnow()
         from .schemas import ProcessingDetails
+        # Determine mode-agnostic extracted values from the chosen processing mode
+        extracted_amount_val = ocr_result.get("amount")
+        extracted_date_raw = ocr_result.get("date")
+        extracted_date_val = _dt.strptime(extracted_date_raw, "%Y-%m-%d").date() if extracted_date_raw else None
+
+        # Also expose mode-specific convenience fields for stateless preview
+        llm_amount = None
+        llm_date = None
+        vision_amount = None
+        vision_date = None
+        mode_used = processing_details.get("mode_used", mode_normalized)
+        if mode_used == "llm":
+            llm_amount = extracted_amount_val
+            llm_date = extracted_date_val
+        elif mode_used == "vision":
+            vision_amount = extracted_amount_val
+            vision_date = extracted_date_val
+
         response_data = {
             'id': 0,
             'collection_id': collection_id,
@@ -104,6 +122,12 @@ async def upload_deposit_slip(
             'file_hash': file_hash,
             'ocr_amount': ocr_result.get("amount"),
             'ocr_date': _dt.strptime(ocr_result.get("date"), "%Y-%m-%d").date() if ocr_result.get("date") else None,
+            'extracted_amount': extracted_amount_val,
+            'extracted_date': extracted_date_val,
+            'llm_amount': llm_amount,
+            'llm_date': llm_date,
+            'vision_amount': vision_amount,
+            'vision_date': vision_date,
             'manual_amount': manual_amount,
             'manual_date': _dt.strptime(manual_date, "%Y-%m-%d").date() if manual_date else None,
             'bank_name': ocr_result.get("bank_name"),

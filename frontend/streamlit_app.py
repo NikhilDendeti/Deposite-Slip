@@ -99,8 +99,8 @@ def upload_view():
         manual_amount = st.number_input("Manual Amount", min_value=0.0, step=0.01)
         manual_date = st.date_input("Manual Date", value=None)
         file = st.file_uploader("Deposit slip file (image or PDF)", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "pdf"])
-        # Only OCR and LLM are available
-        mode = st.selectbox("Processing mode", ["ocr", "llm"], index=0)
+        # Support OCR, LLM, and Vision modes
+        mode = st.selectbox("Processing mode", ["ocr", "llm", "vision"], index=0)
         submitted = st.form_submit_button("Upload")
     if submitted:
         if not file:
@@ -115,7 +115,14 @@ def upload_view():
         }
         # Remove None values for multipart
         data = {k: v for k, v in data.items() if v not in (None, "None", "")}
-        resp = requests.post(f"{st.session_state.api_base}/deposit-slips/upload", files=files, data=data, headers=auth_headers(), timeout=120)
+        # Increase timeout for heavy OCR/LLM processing
+        resp = requests.post(
+            f"{st.session_state.api_base}/deposit-slips/upload",
+            files=files,
+            data=data,
+            headers=auth_headers(),
+            timeout=600,
+        )
         if resp.ok:
             st.success("Uploaded and processed")
             st.json(resp.json())

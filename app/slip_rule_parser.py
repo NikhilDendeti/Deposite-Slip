@@ -134,8 +134,8 @@ class RuleBasedSlipParser:
 
     def _standardize_date(self, date_str: str) -> Optional[str]:
         fmts = [
-            '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d', '%d-%m-%Y', '%m-%d-%Y', '%Y-%m-%d',
-            '%d/%m/%y', '%m/%d/%y', '%y/%m/%d', '%d-%m-%y', '%m-%d-%y', '%y-%m-%d'
+            '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%Y/%m/%d', '%m/%d/%Y', '%m-%d-%Y',
+            '%d/%m/%y', '%d-%m-%y', '%y-%m-%d', '%y/%m/%d', '%m/%d/%y', '%m-%d-%y'
         ]
         for f in fmts:
             try:
