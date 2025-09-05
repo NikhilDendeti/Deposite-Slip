@@ -5,7 +5,7 @@ from typing import Optional
 st.set_page_config(page_title="Deposit Slip System", layout="wide")
 
 if 'api_base' not in st.session_state:
-    st.session_state.api_base = 'http://localhost:8000'
+    st.session_state.api_base = 'https://deposite-slip-5.onrender.com'
 if 'token' not in st.session_state:
     st.session_state.token = None
 if 'user' not in st.session_state:
