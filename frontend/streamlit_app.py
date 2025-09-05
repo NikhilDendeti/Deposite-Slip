@@ -59,6 +59,7 @@ def register_view():
             st.error(resp.text)
 
 def collections_view():
+    # Disabled for now: navigation hides this view
     st.header("Collections")
     cols = st.columns(2)
     with cols[0]:
@@ -85,12 +86,21 @@ def collections_view():
             else:
                 st.error(resp.text)
 
-    resp = requests.get(f"{st.session_state.api_base}/collections", headers=auth_headers(), timeout=60)
-    if resp.ok:
-        data = resp.json()
-        st.dataframe(data, use_container_width=True)
-    else:
-        st.error(resp.text)
+    try:
+        resp = requests.get(
+            f"{st.session_state.api_base}/collections",
+            headers=auth_headers(),
+            timeout=(10, 180),  # connect, read
+        )
+        if resp.ok:
+            data = resp.json()
+            st.dataframe(data, use_container_width=True)
+        else:
+            st.error(resp.text)
+    except requests.Timeout:
+        st.warning("API timed out. If the server is cold-starting (Render), try again in ~30-60s.")
+    except requests.RequestException as e:
+        st.error(f"Request failed: {e}")
 
 def upload_view():
     st.header("Upload Deposit Slip")
@@ -130,52 +140,70 @@ def upload_view():
             st.error(resp.text)
 
 def slips_view():
+    # Disabled for now: navigation hides this view
     st.header("Deposit Slips")
     status = st.selectbox("Filter by status", ["", "pending", "needs_review", "processed"]) or None
     params = {}
     if status:
         params["status"] = status
-    resp = requests.get(f"{st.session_state.api_base}/deposit-slips", headers=auth_headers(), params=params, timeout=60)
-    if resp.ok:
-        data = resp.json()
-        st.dataframe(data, use_container_width=True)
-        # Simple override UI for slips needing review
-        ids = [row["id"] for row in data if row.get("status") == "needs_review"]
-        if ids:
-            st.subheader("Record Override (requires reason & approver)")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                slip_id = st.selectbox("Slip", ids)
-            with col2:
-                reason = st.text_input("Reason")
-            with col3:
-                approver = st.text_input("Approved by")
-            if st.button("Submit Override"):
-                form = {"reason": reason, "approved_by": approver}
-                r = requests.post(f"{st.session_state.api_base}/deposit-slips/{slip_id}/override", data=form, timeout=60)
-                if r.ok:
-                    st.success("Override recorded")
-                    st.rerun()
-                else:
-                    st.error(r.text)
-    else:
-        st.error(resp.text)
+    try:
+        resp = requests.get(
+            f"{st.session_state.api_base}/deposit-slips",
+            headers=auth_headers(),
+            params=params,
+            timeout=(10, 180),  # connect, read
+        )
+        if resp.ok:
+            data = resp.json()
+            st.dataframe(data, use_container_width=True)
+            # Simple override UI for slips needing review
+            ids = [row["id"] for row in data if row.get("status") == "needs_review"]
+            if ids:
+                st.subheader("Record Override (requires reason & approver)")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    slip_id = st.selectbox("Slip", ids)
+                with col2:
+                    reason = st.text_input("Reason")
+                with col3:
+                    approver = st.text_input("Approved by")
+                if st.button("Submit Override"):
+                    form = {"reason": reason, "approved_by": approver}
+                    try:
+                        r = requests.post(
+                            f"{st.session_state.api_base}/deposit-slips/{slip_id}/override",
+                            data=form,
+                            timeout=(10, 180),
+                        )
+                        if r.ok:
+                            st.success("Override recorded")
+                            st.rerun()
+                        else:
+                            st.error(r.text)
+                    except requests.Timeout:
+                        st.warning("Override request timed out. Please retry.")
+                    except requests.RequestException as e:
+                        st.error(f"Override request failed: {e}")
+        else:
+            st.error(resp.text)
+    except requests.Timeout:
+        st.warning("API timed out. If the server is cold-starting (Render), try again in ~30-60s.")
+    except requests.RequestException as e:
+        st.error(f"Request failed: {e}")
 
 def topbar():
     with st.sidebar:
         st.text_input("API Base URL", key="api_base")
         st.markdown("---")
-        view = st.radio("Navigate", ["Collections", "Upload", "Slips"])
+        # Show only Upload for now
+        view = st.radio("Navigate", ["Upload"])
     return view
 
 def main():
     view = topbar()
-    if view == "Collections":
-        collections_view()
-    elif view == "Upload":
+    if view == "Upload":
         upload_view()
-    elif view == "Slips":
-        slips_view()
+    # Other views are disabled
 
 if __name__ == "__main__":
     main()
