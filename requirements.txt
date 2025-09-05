@@ -7,9 +7,11 @@ pydantic-core==2.18.4
 python-multipart==0.0.6
 pytesseract==0.3.10
 pymupdf==1.24.11
+numpy==1.26.4
 opencv-python-headless==4.8.1.78
 httpx==0.25.2
 python-dotenv==1.1.1
 email-validator==2.1.1
 openai==1.51.2
+passlib[bcrypt]==1.7.4
 
