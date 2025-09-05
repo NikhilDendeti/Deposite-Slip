@@ -1,16 +1,14 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-sqlalchemy==2.0.23
-# Use newer Pydantic with musllinux wheels to avoid maturin builds
-pydantic==2.8.2
-python-multipart==0.0.6
-pytesseract==0.3.10
-pymupdf==1.24.11
-numpy==1.26.4
-opencv-python-headless==4.8.1.78
-httpx==0.25.2
-python-dotenv==1.1.1
-email-validator==2.1.1
-openai==1.51.2
-passlib[bcrypt]==1.7.4
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+python-multipart
+pytesseract
+pymupdf
+opencv-python-headless>=4.10.0.84
+httpx
+python-dotenv
+email-validator
+openai
+passlib[bcrypt]
 
