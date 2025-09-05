@@ -63,7 +63,7 @@ def collections_view():
     cols = st.columns(2)
     with cols[0]:
         if st.button("Refresh"):
-            st.experimental_rerun()
+            st.rerun()
     with cols[1]:
         with st.form("create_collection"):
             amount = st.number_input("Amount", min_value=0.0, step=0.01)
@@ -81,7 +81,7 @@ def collections_view():
             resp = requests.post(f"{st.session_state.api_base}/collections", json=payload, headers=auth_headers(), timeout=60)
             if resp.ok:
                 st.success("Collection created")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error(resp.text)
 
@@ -155,7 +155,7 @@ def slips_view():
                 r = requests.post(f"{st.session_state.api_base}/deposit-slips/{slip_id}/override", data=form, timeout=60)
                 if r.ok:
                     st.success("Override recorded")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error(r.text)
     else:
